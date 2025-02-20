@@ -20,6 +20,9 @@ dependencies:
   '@types/three':
     specifier: ^0.172.0
     version: 0.172.0
+  hls.js:
+    specifier: ^1.5.20
+    version: 1.5.20
   potree-core:
     specifier: ^2.0.10
     version: 2.0.10(three@0.172.0)
@@ -1740,6 +1743,10 @@ packages:
     dependencies:
       function-bind: 1.1.2
     dev: true
+
+  /hls.js@1.5.20:
+    resolution: {integrity: sha512-uu0VXUK52JhihhnN/MVVo1lvqNNuhoxkonqgO3IpjvQiGpJBdIXMGkofjQb/j9zvV7a1SW8U9g1FslWx/1HOiQ==}
+    dev: false
 
   /ieee754@1.2.1:
     resolution: {integrity: sha512-dcyqhDvX1C46lXZcVqCpK+FtMRQVdIMN6/Df5js2zouUsqG7I6sFxitIC+7KYK29KdXOLHdu9zL4sFnoVQnqaA==}

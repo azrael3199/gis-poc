@@ -15,6 +15,7 @@
     "@react-three/fiber": "^8.17.12",
     "@roamhq/wrtc": "^0.8.0",
     "@types/three": "^0.172.0",
+    "hls.js": "^1.5.20",
     "potree-core": "^2.0.10",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

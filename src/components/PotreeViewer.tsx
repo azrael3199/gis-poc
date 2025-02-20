@@ -40,6 +40,17 @@ const WebRTCClient: React.FC<WebRTCClientProps> = ({
         // Add a transceiver for receiving video only.
         pc.addTransceiver("video", { direction: "recvonly" });
 
+        // const transceiver = pc
+        //   .getTransceivers()
+        //   .find((t) => t.receiver.track.kind === "video");
+
+        // if (transceiver) {
+        //   console.log("Transceiver found:", transceiver);
+        //   transceiver.setCodecPreferences([
+        //     { mimeType: "video/VP8", clockRate: 90000 },
+        //   ]);
+        // }
+
         console.log("Peer connection created:", pc);
 
         // Create an offer.
@@ -69,6 +80,10 @@ const WebRTCClient: React.FC<WebRTCClientProps> = ({
           }
         };
 
+        pc.addEventListener("iceconnectionstatechange", () => {
+          console.log("ICE state:", pc.iceConnectionState);
+        });
+
         // When a remote track is received, attach it to the video element.
         pc.ontrack = (event) => {
           console.log("Received remote track:", event);
@@ -76,6 +91,7 @@ const WebRTCClient: React.FC<WebRTCClientProps> = ({
           if (videoRef.current) {
             console.log("Attaching remote track to video element");
             videoRef.current.srcObject = stream;
+            videoRef.current.play();
           }
 
           // Check if data is being received on the track
