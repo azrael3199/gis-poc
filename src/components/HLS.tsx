@@ -16,6 +16,8 @@ const VideoStream = ({
         },
         body: JSON.stringify({
           pointCloudUrl: pointCloudURL,
+          viewportHeight: videoRef.current?.height || 720,
+          viewportWidth: videoRef.current?.width || 1280,
         }),
       });
       setIsStreaming(true);

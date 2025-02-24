@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -16,6 +18,7 @@ import (
 )
 
 var (
+	gstCmd        *exec.Cmd
 	ffmpegCmd     *exec.Cmd
 	mu            sync.Mutex
 	browserCtx    context.Context
@@ -58,9 +61,11 @@ func startStream(w http.ResponseWriter, r *http.Request) {
 	// Ensure HLS directory exists
 	os.MkdirAll("hls", os.ModePerm)
 
-	// Get pointCloudUrl from request parameters
+	// Get pointCloudUrl, viewportHeight, and viewportWidth from request parameters
 	var requestBody struct {
-		PointCloudURL string `json:"pointCloudUrl"`
+		PointCloudURL  string `json:"pointCloudUrl"`
+		ViewportHeight int    `json:"viewportHeight"`
+		ViewportWidth  int    `json:"viewportWidth"`
 	}
 	err := json.NewDecoder(r.Body).Decode(&requestBody)
 	if err != nil {
@@ -69,9 +74,29 @@ func startStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pointCloudUrl := requestBody.PointCloudURL
+	viewportHeight := requestBody.ViewportHeight
+	viewportWidth := requestBody.ViewportWidth
+	ctx := openBrowser(pointCloudUrl, viewportHeight, viewportWidth)
 
-	go openBrowser(pointCloudUrl)
+	// Get window position and size using chromedp
+	var x, y, width, height int
+	// ctx, cancel := chromedp.NewContext(context.Background())
 
+	err = chromedp.Run(ctx,
+		chromedp.Evaluate(`window.screenX + window.outerWidth - window.innerWidth`, &x),
+		chromedp.Evaluate(`window.screenY + window.outerHeight - window.innerHeight`, &y),
+		chromedp.Evaluate(`window.innerWidth`, &width),
+		chromedp.Evaluate(`window.innerHeight`, &height),
+	)
+	if err != nil {
+		http.Error(w, "Failed to get Chrome window position", http.StatusInternalServerError)
+		log.Println("Error getting Chrome window position:", err)
+		return
+	}
+
+	log.Printf("Capturing window at X:%d, Y:%d, Width:%d, Height:%d\n", x, y, width, height)
+
+	// Keep the original commented code as requested
 	// err := chromedp.Run(ctx,
 	// 	chromedp.Evaluate(`document.title = "`+fullWindowTitle+`"`, nil),
 	// )
@@ -79,27 +104,62 @@ func startStream(w http.ResponseWriter, r *http.Request) {
 	// 	log.Fatal(err)
 	// }
 
-	// FFmpeg command to capture screen and generate HLS output
 	ffmpegCmd = exec.Command("ffmpeg",
 		"-f", "dshow",
-		"-framerate", "30",
 		"-i", "video=screen-capture-recorder",
-		"-vf", "scale=1920:1080",
-		"-c:v", "libx264",
-		"-preset", "ultrafast",
-		"-tune", "zerolatency", // Low-latency optimization
-		"-b:v", "2M",
-		"-g", "30", // Keyframe interval
-		"-hls_time", "1", // Each segment is 2 seconds
-		"-hls_list_size", "5", // Keep 10 segments in the playlist
-		"-hls_flags", "append_list", // Append new segments instead of deleting
-		"-hls_flags", "delete_segments+append_list+split_by_time", // Each segment is standalone
-		"-hls_segment_filename", "hls/segment_%03d.ts", // Save segments properly
-		"-hls_segment_type", "mpegts",
-		"-hls_flags", "delete_segments", // Remove old segments
+		"-r", "40",
+		"-vf", fmt.Sprintf("crop=%d:%d:%d:%d,format=yuv420p,scale=%d:%d", width, height, x, y+50, 1280, 720),
+		"-c:v", "libvpx-vp9",
+		"-b:v", "6M",
+		"-g", "40",
+		"-quality", "realtime",
+		"-rtbufsize", "40M",
+		"-speed", "6",
+		"-threads", "8",
+		"-deadline", "realtime",
+		"-frame-parallel", "1",
+		"-tile-columns", "4",
+		"-row-mt", "1",
+		"-hls_time", "1",
+		"-hls_list_size", "5",
+		"-hls_flags", "append_list+delete_segments+split_by_time",
+		"-hls_segment_filename", "hls/segment_%03d.m4s",
+		"-hls_segment_type", "fmp4",
 		"-f", "hls",
 		"hls/output.m3u8",
 	)
+
+	_, err = ffmpegCmd.StdoutPipe()
+	if err != nil {
+		http.Error(w, "Failed to get FFmpeg stdout", http.StatusInternalServerError)
+		log.Println("Error getting FFmpeg stdout:", err)
+		return
+	}
+
+	stderr, err := ffmpegCmd.StderrPipe()
+	if err != nil {
+		http.Error(w, "Failed to get FFmpeg stderr", http.StatusInternalServerError)
+		log.Println("Error getting FFmpeg stderr:", err)
+		return
+	}
+
+	// go func() {
+	// 	log.Println("FFmpeg stdout:")
+	// 	defer stdout.Close()
+	// 	scanner := bufio.NewScanner(stdout)
+	// 	for scanner.Scan() {
+	// 		log.Println(scanner.Text())
+	// 	}
+	// }()
+
+	go func() {
+		log.Println("FFmpeg stderr:")
+		defer stderr.Close()
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			log.Println(scanner.Text())
+		}
+	}()
 
 	if err := ffmpegCmd.Start(); err != nil {
 		http.Error(w, "Failed to start stream", http.StatusInternalServerError)
@@ -111,7 +171,150 @@ func startStream(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Stream started"))
 }
 
-// stopStream stops the FFmpeg process
+// // stopStream stops the FFmpeg process
+// func stopStream(w http.ResponseWriter, r *http.Request) {
+// 	mu.Lock()
+// 	defer mu.Unlock()
+
+// 	if ffmpegCmd == nil {
+// 		http.Error(w, "No active stream", http.StatusNotFound)
+// 		return
+// 	}
+
+// 	if err := ffmpegCmd.Process.Kill(); err != nil {
+// 		http.Error(w, "Failed to stop stream", http.StatusInternalServerError)
+// 		log.Println("Error stopping FFmpeg:", err)
+// 		return
+// 	}
+
+// 	ffmpegCmd = nil
+
+// 	closeBrowser()
+
+// 	// Clear the contents of the /hls/ folder
+// 	hlsDir := "hls/"
+// 	dir, err := os.Open(hlsDir)
+// 	if err != nil {
+// 		log.Println("Error opening HLS directory:", err)
+// 	} else {
+// 		defer dir.Close()
+// 		files, err := dir.Readdirnames(-1)
+// 		if err != nil {
+// 			log.Println("Error reading HLS directory:", err)
+// 		} else {
+// 			for _, file := range files {
+// 				err := os.Remove(hlsDir + file)
+// 				if err != nil {
+// 					log.Println("Error removing file:", err)
+// 				}
+// 			}
+// 		}
+// 	}
+
+// 	log.Println("Streaming stopped")
+// 	w.Write([]byte("Stream stopped"))
+// }
+
+// func startStream(w http.ResponseWriter, r *http.Request) {
+// 	mu.Lock()
+// 	defer mu.Unlock()
+
+// 	if gstCmd != nil {
+// 		http.Error(w, "Stream already running", http.StatusConflict)
+// 		return
+// 	}
+
+// 	os.MkdirAll("hls", os.ModePerm)
+
+// 	var requestBody struct {
+// 		PointCloudURL string `json:"pointCloudUrl"`
+// 	}
+// 	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+// 		http.Error(w, err.Error(), http.StatusBadRequest)
+// 		return
+// 	}
+
+// 	pointCloudUrl := requestBody.PointCloudURL
+// 	go openBrowser(pointCloudUrl)
+
+// 	gstCmd = exec.Command("gst-launch-1.0",
+// 		"d3d11screencapturesrc", "!", "videoconvert", "!", "videoscale", "!",
+// 		"video/x-raw,framerate=40/1,width=1920,height=1080", "!", "vp9enc",
+// 		"target-bitrate=6000000", "cpu-used=6", "deadline=1", "threads=8", "tile-columns=4", "row-mt=true", "!",
+// 		"filesink", "location=NUL",
+// 	)
+
+// 	// gstCmd.Stdout = os.Stdout
+// 	// gstCmd.Stderr = os.Stderr
+
+// 	ffmpegCmd = exec.Command("ffmpeg",
+// 		"-i", "-",
+// 		"-c:v", "libvpx-vp9",
+// 		"-c:a", "opus",
+// 		"-hls_time", "1",
+// 		"-hls_list_size", "5",
+// 		"-hls_flags", "append_list+delete_segments+split_by_time",
+// 		"-hls_segment_filename", "hls/segment_%03d.m4s",
+// 		"-hls_segment_type", "fmp4",
+// 		"-f", "hls",
+// 		"-loglevel", "debug",
+// 	)
+
+// 	ffmpegIn, err := ffmpegCmd.StdinPipe()
+// 	if err != nil {
+// 		http.Error(w, "Failed to get FFmpeg stdin", http.StatusInternalServerError)
+// 		log.Println("Error getting FFmpeg stdin:", err)
+// 		return
+// 	}
+
+// 	gstOut, err := gstCmd.StdoutPipe()
+// 	if err != nil {
+// 		http.Error(w, "Failed to get GStreamer stdout", http.StatusInternalServerError)
+// 		log.Println("Error getting GStreamer stdout:", err)
+// 		return
+// 	}
+
+// 	gstErr, err := gstCmd.StderrPipe()
+// 	if err != nil {
+// 		http.Error(w, "Failed to get GStreamer stderr", http.StatusInternalServerError)
+// 		log.Println("Error getting GStreamer stderr:", err)
+// 		return
+// 	}
+
+// 	go func() {
+// 		defer ffmpegIn.Close()
+// 		log.Println("Copying from GStreamer to FFmpeg...")
+// 		_, err := io.Copy(ffmpegIn, gstOut)
+// 		if err != nil {
+// 			log.Println("Error copying from GStreamer to FFmpeg:", err)
+// 		}
+// 	}()
+
+// 	go func() {
+// 		log.Println("GStreamer stderr:")
+// 		defer gstErr.Close()
+// 		scanner := bufio.NewScanner(gstErr)
+// 		for scanner.Scan() {
+// 			log.Println(scanner.Text())
+// 		}
+// 	}()
+
+// 	if err := ffmpegCmd.Start(); err != nil {
+// 		http.Error(w, "Failed to start FFmpeg", http.StatusInternalServerError)
+// 		log.Println("FFmpeg error:", err)
+// 		return
+// 	}
+
+// 	if err := gstCmd.Start(); err != nil {
+// 		http.Error(w, "Failed to start GStreamer", http.StatusInternalServerError)
+// 		log.Println("GStreamer error:", err)
+// 		return
+// 	}
+
+// 	log.Println("Streaming started")
+// 	w.Write([]byte("Stream started"))
+// }
+
 func stopStream(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -156,17 +359,18 @@ func stopStream(w http.ResponseWriter, r *http.Request) {
 }
 
 // openBrowser launches Chrome using chromedp
-func openBrowser(pointCloudUrl string) {
+func openBrowser(pointCloudUrl string, viewportHeight int, viewportWidth int) context.Context {
 
 	// Disable headless mode and configure visible window
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", false), // Disable headless mode
 		chromedp.Flag("hide-scrollbars", false),
-		chromedp.Flag("window-position", "100,100"), // Position window
+		chromedp.Flag("window-position", "0,0"), // Position window
 		// chromedp.Flag("window-title", fullWindowTitle),
 		chromedp.Flag("app", "http://localhost:8080/potree/viewer.html?pointcloudURL="+url.QueryEscape(pointCloudUrl)),
 		chromedp.Flag("disable-gpu", false), // Enable GPU acceleration
-		chromedp.WindowSize(1280, 720),
+		chromedp.Flag("disable-infobars", true),
+		chromedp.WindowSize(viewportWidth, viewportHeight),
 	)
 
 	// Force window to foreground
@@ -195,6 +399,8 @@ func openBrowser(pointCloudUrl string) {
 	); err != nil {
 		log.Fatal("Chrome initialization failed:", err)
 	}
+
+	return browserCtx
 }
 
 // closeBrowser closes the Chromedp session
